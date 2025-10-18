@@ -1,101 +1,63 @@
 import os
 import asyncio
-from datetime import datetime, time, timedelta
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    MessageHandler,
-    ChatMemberHandler,
-    filters,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
-# --- Bot info from environment variables ---
-BOT_TOKEN = os.environ["BOT_TOKEN"]  # your Telegram bot token
-GROUP_ID = int(os.environ["GROUP_ID"])  # your group id
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # full URL to your Render webhook
-PORT = int(os.environ.get("PORT", 8443))  # Render port, default 8443
+# Load environment variables
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+GROUP_ID = int(os.environ.get("GROUP_ID", 0))  # your group ID
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")    # full URL Render will call
 
-# --- Bot commands ---
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN is not set in environment variables")
+if GROUP_ID == 0:
+    raise ValueError("GROUP_ID is not set or invalid in environment variables")
+if not WEBHOOK_URL:
+    raise ValueError("WEBHOOK_URL is not set in environment variables")
+
+# Command handler
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send greeting in private chat."""
-    await update.message.reply_text(
-        "Hello! 👋 Ripple bot is running.\n"
-        "You’ll receive your first prompt at 8 PM.\n"
-        "Please reply privately to the bot when prompted."
-    )
+    await update.message.reply_text("Hello! Bot is running with webhook.")
 
+# Welcome new members
+async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for member in update.message.new_chat_members:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"Welcome {member.full_name}! Please start the bot in private chat using /start."
+        )
 
-# --- Scheduler tasks ---
-async def send_prompt(app):
-    await app.bot.send_message(
-        chat_id=GROUP_ID,
-        text="🎙️ New prompt! What made you smile today?\n"
-             "Reply privately to me!"
-    )
+# Example echo handler
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"You said: {update.message.text}")
 
-
-async def reveal_answers(app):
-    await app.bot.send_message(
-        chat_id=GROUP_ID,
-        text="⏰ Time’s up! Everyone who replied can now see the answers 💬"
-    )
-
-
-async def scheduler_loop(app):
-    """Loop that schedules prompt at 8 PM and reveal at 6 PM next day."""
-    while True:
-        now = datetime.now()
-
-        # --- Prompt at 8 PM ---
-        prompt_time = datetime.combine(now.date(), time(20, 0))
-        if now > prompt_time:
-            prompt_time += timedelta(days=1)
-        await asyncio.sleep((prompt_time - now).total_seconds())
-        await send_prompt(app)
-
-        # --- Reveal next day at 6 PM ---
-        now = datetime.now()
-        reveal_time = datetime.combine(now.date(), time(18, 0)) + timedelta(days=1)
-        await asyncio.sleep((reveal_time - now).total_seconds())
-        await reveal_answers(app)
-
-
-# --- Handle new users joining group ---
-async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    new_user = update.chat_member.new_chat_member.user
-    await context.bot.send_message(
-        chat_id=GROUP_ID,
-        text=f"👋 Welcome {new_user.full_name}! "
-             "Please start the bot in private chat by sending /start."
-    )
-
-
-# --- Main bot setup ---
 async def main():
+    # Build and initialize app
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    await app.initialize()
 
-    # Command handlers
+    # Add handlers
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
-    # New members
-    app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
+    # Start webhook
+    await app.start_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", 5000)),
+        webhook_url=WEBHOOK_URL
+    )
 
-    # Start the scheduler in the background
-    asyncio.create_task(scheduler_loop(app))
+    print("✅ Webhook bot is running...")
 
-    # Run webhook (Render)
-    if WEBHOOK_URL:
-        await app.start()
-        await app.bot.set_webhook(WEBHOOK_URL)
-        print("✅ Bot is running on webhook!")
-        # Keep running
-        await asyncio.Event().wait()
-    else:
-        print("⚠️ WEBHOOK_URL not set. Running with polling...")
-        await app.run_polling()
-
+    # Keep bot running
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
