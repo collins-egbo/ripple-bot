@@ -1,59 +1,50 @@
 import os
 import json
 import random
-import asyncio
 from datetime import time, datetime, timedelta
-from telegram import Update, ChatPermissions
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, filters,
-    ContextTypes, CallbackContext
-)
 from pytz import timezone
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes,
+    filters, CallbackContext
+)
 
 # =========================
-# Environment Variables
+# 🔧 CONFIGURATION
 # =========================
+
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-MAIN_GROUP_ID = int(os.environ["GROUP_ID"])  # Main chat group
+MAIN_GROUP_ID = int(os.environ["GROUP_ID"])
 TIMEZONE = timezone("Europe/Amsterdam")
 
+# --- Daily Schedule (editable for testing) ---
+PROMPT_TIME = time(20, 0, tzinfo=TIMEZONE)      # 8:00 PM — new daily prompt
+REMINDER_TIME = time(17, 0, tzinfo=TIMEZONE)    # 5:00 PM — 1-hour-left reminder
+REVEAL_TIME = time(18, 0, tzinfo=TIMEZONE)      # 6:00 PM — reveal + discussion
+CLEANUP_TIME = time(17, 0, tzinfo=TIMEZONE)     # 5:00 PM next day — clean old discussion
+
 # =========================
-# Prompts Section
+# 📋 PROMPTS
 # =========================
+
 PROMPTS = [
     {"topic": "Mental Wellbeing", "text": "What’s one small thing that secretly keeps you sane when life gets messy?"},
     {"topic": "Mental Wellbeing", "text": "When was the last time you took a proper break — like really unplugged — and what did you do?"},
     {"topic": "Mental Wellbeing", "text": "What’s something you’ve started doing lately that makes your days feel lighter?"},
     {"topic": "Mental Wellbeing", "text": "If you could press pause on everything for a day, what would you spend that day doing?"},
     {"topic": "Mental Wellbeing", "text": "Be honest — what’s your brain’s current “weather forecast”? (sunny, foggy, thunderstorms…)"},
-    {"topic": "Mental Wellbeing", "text": "What’s a habit you dropped that you kinda want back?"},
-    {"topic": "Mental Wellbeing", "text": "When do you usually feel most like yourself?"},
-    {"topic": "Mental Wellbeing", "text": "What’s something you wish more people understood about you right now?"},
 
     {"topic": "Fun Memories", "text": "What’s a memory with this group that instantly makes you grin?"},
     {"topic": "Fun Memories", "text": "Who in this group is most likely to turn a normal night into a story we’ll tell for years?"},
     {"topic": "Fun Memories", "text": "What’s the dumbest inside joke you still remember?"},
     {"topic": "Fun Memories", "text": "If you could relive one hilarious moment from our past together, which would it be?"},
     {"topic": "Fun Memories", "text": "What’s something funny that happened recently that you wish we’d all been there for?"},
-    {"topic": "Fun Memories", "text": "What’s a trip, party, or random day that didn’t go as planned but turned out even better?"},
-    {"topic": "Fun Memories", "text": "What’s a “you had to be there” moment that still cracks you up?"},
-    {"topic": "Fun Memories", "text": "What’s one memory you’d 100% put in a highlight reel of your life?"},
 
     {"topic": "Future Plans", "text": "If this group planned a trip together, where would we end up — and who’s getting lost first?"},
     {"topic": "Future Plans", "text": "What’s one dream you secretly hope you’ll pull off (even if it sounds crazy)?"},
     {"topic": "Future Plans", "text": "If we met again in 10 years, what do you hope your life looks like?"},
     {"topic": "Future Plans", "text": "What’s a skill or hobby you’ve been “meaning to start” forever — be honest!"},
     {"topic": "Future Plans", "text": "If you had to make one bold change in your life before next summer, what would it be?"},
-    {"topic": "Future Plans", "text": "If your future self could send you a short voice note, what do you think they’d say?"},
-    {"topic": "Future Plans", "text": "What’s something you’d do if you knew you couldn’t fail?"},
-    {"topic": "Future Plans", "text": "What’s a goal that scares you a little (in a good way)?"},
-
-    {"topic": "Friendship & Growth", "text": "What’s something you’ve learned from someone in this group?"},
-    {"topic": "Friendship & Growth", "text": "When did you first realize this group had become your people?"},
-    {"topic": "Friendship & Growth", "text": "What’s one thing you wish we did more often together?"},
-    {"topic": "Friendship & Growth", "text": "How do you think you’ve changed the most since we first met?"},
-    {"topic": "Friendship & Growth", "text": "If you could tell your past self one thing from what you’ve learned lately, what would it be?"},
-    {"topic": "Friendship & Growth", "text": "What’s one way you try to show up for your friends, even on off days?"}
 ]
 
 USED_PROMPTS_FILE = "used_prompts.json"
@@ -61,8 +52,9 @@ DISCUSSION_FILE = "discussion_group.json"
 REPLIES_FILE = "replies.json"
 
 # =========================
-# Utility Functions
+# 📦 UTILITIES
 # =========================
+
 def load_json(file):
     if not os.path.exists(file):
         return {}
@@ -85,27 +77,62 @@ def get_daily_prompt():
     used_indices.append(chosen_index)
     save_json(USED_PROMPTS_FILE, {"used": used_indices})
     chosen = PROMPTS[chosen_index]
-    return f"🌞 **Daily Prompt**\n🧭 *Topic:* {chosen['topic']}\n💬 *Prompt:* {chosen['text']}"
+    return f"🌞 *Daily Prompt*\n🧭 *Topic:* {chosen['topic']}\n💬 *Prompt:* {chosen['text']}"
 
 # =========================
-# Handlers
+# 💬 HANDLERS
 # =========================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hey there! I’ll send you a daily question at 8 PM. Reply here privately to join the next reveal!")
+    await update.message.reply_text(
+        "Hey there! I’ll send a daily question to the group at 8 PM. "
+        "Reply to me *privately* before 6 PM tomorrow to join the reveal. 💬"
+    )
 
 async def collect_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     replies = load_json(REPLIES_FILE)
     user_id = str(update.message.from_user.id)
     replies[user_id] = update.message.to_dict()
     save_json(REPLIES_FILE, replies)
-    await update.message.reply_text("Got it! Your reply’s in for today’s round 💬")
+    await update.message.reply_text("Got it! Your reply’s saved for today’s round 💬")
 
 # =========================
-# Scheduled Jobs
+# ⏰ SCHEDULED JOBS
 # =========================
+
 async def send_daily_prompt(context: CallbackContext):
+    bot = context.bot
     prompt = get_daily_prompt()
-    await context.bot.send_message(chat_id=MAIN_GROUP_ID, text=prompt, parse_mode="Markdown")
+
+    # Unpin old prompt
+    try:
+        chat = await bot.get_chat(MAIN_GROUP_ID)
+        if chat.pinned_message:
+            await bot.unpin_chat_message(chat_id=MAIN_GROUP_ID)
+    except Exception as e:
+        print("No message to unpin or error:", e)
+
+    # Send and pin new prompt
+    text = (
+        f"{prompt}\n\n"
+        "📝 *How it works:*\n"
+        "• Reply to me *in private* (text or voice).\n"
+        f"• Deadline: *{REVEAL_TIME.hour}:00 tomorrow*.\n"
+        "• At that time, I’ll reveal everyone’s answers in a private chat.\n"
+        "• You’ll have until *17:00 the next day* to discuss before it resets. 💬"
+    )
+    msg = await bot.send_message(chat_id=MAIN_GROUP_ID, text=text, parse_mode="Markdown")
+    try:
+        await bot.pin_chat_message(chat_id=MAIN_GROUP_ID, message_id=msg.message_id)
+    except Exception as e:
+        print("Error pinning message:", e)
+
+async def last_hour_reminder(context: CallbackContext):
+    await context.bot.send_message(
+        chat_id=MAIN_GROUP_ID,
+        text="⏳ *Last hour to answer today’s prompt!* Reply privately to me before *18:00* to join today’s reveal. 🎧",
+        parse_mode="Markdown"
+    )
 
 async def reveal_replies(context: CallbackContext):
     replies = load_json(REPLIES_FILE)
@@ -119,13 +146,7 @@ async def reveal_replies(context: CallbackContext):
         save_json(DISCUSSION_FILE, discussion_info)
     group_id = discussion_info["chat_id"]
 
-    # Clear old messages
-    try:
-        await bot.delete_message(chat_id=group_id, message_id=0)
-    except Exception:
-        pass
-
-    # Forward all replies
+    # Forward replies to discussion
     for uid, msg in replies.items():
         try:
             if "voice" in msg:
@@ -137,10 +158,10 @@ async def reveal_replies(context: CallbackContext):
             print("Error forwarding:", e)
 
     # Invite participants
-    invite_link = await bot.create_chat_invite_link(chat_id=group_id, member_limit=0, creates_join_request=False)
+    invite_link = await bot.create_chat_invite_link(chat_id=group_id)
     for uid in replies.keys():
         try:
-            await bot.send_message(chat_id=uid, text=f"🗣 Discussion is live! Join here:\n{invite_link.invite_link}")
+            await bot.send_message(chat_id=uid, text=f"🗣 The discussion is open! Join here:\n{invite_link.invite_link}")
         except Exception:
             pass
 
@@ -150,24 +171,38 @@ async def cleanup_discussion(context: CallbackContext):
     info = load_json(DISCUSSION_FILE)
     if "chat_id" in info:
         try:
-            await context.bot.delete_chat_messages(chat_id=info["chat_id"])
+            await context.bot.send_message(chat_id=info["chat_id"], text="🧹 Discussion closing — see you at 8 PM for a new one!")
         except Exception:
             pass
 
 # =========================
-# Main
+# 🕒 COMMAND: /nexttimes
 # =========================
+async def show_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"🕒 *Current schedule (Amsterdam time)*\n"
+        f"• New prompt: {PROMPT_TIME.strftime('%H:%M')}\n"
+        f"• Reminder: {REMINDER_TIME.strftime('%H:%M')}\n"
+        f"• Reveal: {REVEAL_TIME.strftime('%H:%M')}\n"
+        f"• Cleanup: {CLEANUP_TIME.strftime('%H:%M')}",
+        parse_mode="Markdown"
+    )
+
+# =========================
+# 🚀 MAIN
+# =========================
+
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("nexttimes", show_schedule))
     app.add_handler(MessageHandler(filters.TEXT | filters.VOICE, collect_reply))
 
     job_queue = app.job_queue
-
-    job_queue.run_daily(send_daily_prompt, time=time(20, 0, tzinfo=TIMEZONE), name="daily_prompt")
-    job_queue.run_daily(reveal_replies, time=time(18, 0, tzinfo=TIMEZONE), name="reveal")
-    job_queue.run_daily(cleanup_discussion, time=time(17, 0, tzinfo=TIMEZONE), name="cleanup")
+    job_queue.run_daily(send_daily_prompt, time=PROMPT_TIME, name="daily_prompt")
+    job_queue.run_daily(last_hour_reminder, time=REMINDER_TIME, name="reminder")
+    job_queue.run_daily(reveal_replies, time=REVEAL_TIME, name="reveal")
+    job_queue.run_daily(cleanup_discussion, time=CLEANUP_TIME, name="cleanup")
 
     app.run_polling()
 
