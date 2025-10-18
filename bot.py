@@ -8,7 +8,6 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     ContextTypes,
-    JobQueue,
     filters,
 )
 
@@ -17,7 +16,7 @@ BOT_TOKEN    = os.environ["BOT_TOKEN"]                       # e.g. 8423:AA...
 GROUP_ID     = int(os.environ["GROUP_ID"])                   # e.g. -4835689810
 WEBHOOK_BASE = os.environ["WEBHOOK_BASE"]                    # e.g. https://ripple-bot.onrender.com  (no trailing slash)
 PORT         = int(os.environ.get("PORT", "10000"))          # Render port
-TZ_NAME      = os.environ.get("TZ", "Europe/Amsterdam")      # your local timezone
+TZ_NAME      = os.environ.get("TZ", "Europe/Amsterdam")
 TZ           = ZoneInfo(TZ_NAME)
 
 # ---- In-memory storage (MVP) ----
@@ -90,24 +89,22 @@ async def job_reveal_answers(context: ContextTypes.DEFAULT_TYPE):
 
 # ===== Main (webhook + jobqueue) =====
 def main():
-    # Create a JobQueue instance and pass it to the Application so PTB manages it.
-    jq = JobQueue(timezone=TZ)  # PTB will start/stop it automatically
-    app = ApplicationBuilder().token(BOT_TOKEN).job_queue(jq).build()
+    # PTB will create & manage JobQueue automatically since you installed the extras.
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & (~filters.COMMAND), collect_private_reply))
 
-    # Schedule jobs
-    app.job_queue.run_daily(job_send_prompt, time=time(20, 0, tzinfo=TZ), name="daily_prompt")
+    # Schedule daily jobs using the auto-created job_queue
+    app.job_queue.run_daily(job_send_prompt,    time=time(20, 0, tzinfo=TZ), name="daily_prompt")
     app.job_queue.run_daily(job_reveal_answers, time=time(18, 0, tzinfo=TZ), name="daily_reveal")
 
     # Webhook setup — Telegram needs a concrete path. Use the token as a secret path.
-    url_path = BOT_TOKEN
+    url_path   = BOT_TOKEN
     webhook_url = f"{WEBHOOK_BASE.rstrip('/')}/{url_path}"
 
-    # This starts aiohttp server internally AND sets the webhook.
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
