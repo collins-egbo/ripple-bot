@@ -22,10 +22,10 @@ RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")  # Render sets this automatic
 PORT = int(os.environ.get("PORT", "10000"))         # Render scans this port; must bind to it
 
 # --- Daily Schedule (editable for testing) ---
-PROMPT_TIME    = time(20, 0, tzinfo=TIMEZONE)   # 8:00 PM — new daily prompt
-REMINDER_TIME  = time(17, 0, tzinfo=TIMEZONE)   # 5:00 PM — 1-hour-left reminder (before reveal)
-REVEAL_TIME    = time(18, 0, tzinfo=TIMEZONE)   # 6:00 PM — reveal + discussion
-CLEANUP_TIME   = time(17, 0, tzinfo=TIMEZONE)   # 5:00 PM next day — clean old discussion
+PROMPT_TIME    = time(11, 20, tzinfo=TIMEZONE)   # 8:00 PM — new daily prompt
+REMINDER_TIME  = time(11, 30, tzinfo=TIMEZONE)   # 5:00 PM — 1-hour-left reminder (before reveal)
+REVEAL_TIME    = time(12, 0, tzinfo=TIMEZONE)   # 6:00 PM — reveal + discussion
+CLEANUP_TIME   = time(12, 30, tzinfo=TIMEZONE)   # 5:00 PM next day — clean old discussion
 
 # Files for simple persistence (OK on Render's ephemeral disk for this trial)
 USED_PROMPTS_FILE = "used_prompts.json"
