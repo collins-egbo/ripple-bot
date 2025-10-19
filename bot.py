@@ -17,21 +17,13 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 MAIN_GROUP_ID = int(os.environ["GROUP_ID"])
 TIMEZONE = timezone("Europe/Amsterdam")
 
-# Render-specific (for webhooks)
-RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
-PORT = int(os.environ.get("PORT", "10000"))
+# --- Daily Schedule (editable for testing) ---
+# Set these to your test or real times (Amsterdam tz)
+PROMPT_TIME   = time(12, 50, tzinfo=TIMEZONE)
+REMINDER_TIME = time(12, 55, tzinfo=TIMEZONE)
+REVEAL_TIME   = time(13,  5, tzinfo=TIMEZONE)
+CLEANUP_TIME  = time(13, 10, tzinfo=TIMEZONE)
 
-# --- 🧪 TEST SCHEDULE (all today, Amsterdam time) ---
-# Adjust these times for your local timezone testing
-PROMPT_TIME    = time(11, 40, tzinfo=TIMEZONE)   # Show prompt at 11:40
-REMINDER_TIME  = time(11, 45, tzinfo=TIMEZONE)   # Reminder at 11:45
-REVEAL_TIME    = time(12, 0,  tzinfo=TIMEZONE)   # Reveal at 12:00
-CLEANUP_TIME   = time(12, 20, tzinfo=TIMEZONE)   # Cleanup at 12:20
-
-# Files for persistence (ephemeral on Render)
-USED_PROMPTS_FILE = "used_prompts.json"
-DISCUSSION_FILE   = "discussion_group.json"
-REPLIES_FILE      = "replies.json"
 
 # =========================
 # 📋 PROMPTS
@@ -42,6 +34,15 @@ PROMPTS = [
     {"topic": "Fun Memories", "text": "What’s a memory with this group that instantly makes you grin?"},
     {"topic": "Future Plans", "text": "If this group planned a trip together, where would we end up — and who’s getting lost first?"},
 ]
+
+# =========================
+# 🗂️ FILES
+# =========================
+
+USED_PROMPTS_FILE = "used_prompts.json"
+DISCUSSION_FILE   = "discussion_group.json"  # {"chat_id": int}
+REPLIES_FILE      = "replies.json"           # {user_id: full_message_dict}
+PARTICIPANTS_FILE = "participants.json"      # {"current": [user_ids], "last_invite_link": "...", "last_round": "YYYY-MM-DD"}
 
 # =========================
 # 📦 UTILITIES
@@ -79,19 +80,46 @@ def get_discussion_chat_id() -> int | None:
 def set_discussion_chat_id(chat_id: int):
     save_json(DISCUSSION_FILE, {"chat_id": int(chat_id)})
 
+def set_participants(ids: list[int], invite_link: str | None, round_key: str):
+    save_json(PARTICIPANTS_FILE, {
+        "current": list(map(int, ids)),
+        "last_invite_link": invite_link,
+        "last_round": round_key,
+    })
+
+def get_participants():
+    data = load_json(PARTICIPANTS_FILE)
+    return {
+        "current": [int(x) for x in data.get("current", [])],
+        "last_invite_link": data.get("last_invite_link"),
+        "last_round": data.get("last_round"),
+    }
+
+def today_key(dt: datetime | None = None) -> str:
+    dt = dt or datetime.now(TIMEZONE)
+    return dt.strftime("%Y-%m-%d")
+
+def next_datetime_at(t: time) -> datetime:
+    """Return the next datetime (>= now) at local time 't'."""
+    now = datetime.now(TIMEZONE)
+    target = now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+    if target < now:
+        target += timedelta(days=1)
+    return target
+
 # =========================
 # 💬 HANDLERS
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Hey there! 🧪 Test mode active.\n"
-        "Prompt at 11:40 → Reminder 11:45 → Reveal 12:00 → Cleanup 12:20.\n"
-        "Reply to me *privately* to join the reveal. 💬",
+        "Hey! I’ll post a prompt in the group at the scheduled time. "
+        "Reply to me *privately* (text or voice) before the reveal to join the discussion. 💬",
         parse_mode="Markdown"
     )
 
 async def collect_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Only accept private replies as entries
     if update.effective_chat.type != "private":
         return
 
@@ -99,15 +127,43 @@ async def collect_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     replies[user_id] = update.message.to_dict()
     save_json(REPLIES_FILE, replies)
-    await update.message.reply_text("Got it! Your reply’s saved for today’s test round 💬")
+
+    # Track participant for this round
+    p = get_participants()
+    curr = set(p["current"])
+    curr.add(int(user_id))
+    set_participants(sorted(curr), p.get("last_invite_link"), today_key())
+
+    await update.message.reply_text("Got it! Your reply’s saved for this round 💬")
 
 async def set_discussion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("Run this in the *group* you want to use for discussions.", parse_mode="Markdown")
+        await update.message.reply_text(
+            "Run this in the *discussion group* you want me to use.",
+            parse_mode="Markdown"
+        )
         return
     set_discussion_chat_id(chat.id)
-    await update.message.reply_text("✅ This group is now set as the test discussion space.")
+    await update.message.reply_text("✅ This group is now set as the discussion space.")
+
+async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Welcome message in the MAIN group when someone joins."""
+    chat = update.effective_chat
+    if chat.id != MAIN_GROUP_ID:
+        return
+    bot_user = await context.bot.get_me()
+    bot_link = f"https://t.me/{bot_user.username}"
+    for user in update.message.new_chat_members:
+        name = user.first_name or "there"
+        await context.bot.send_message(
+            chat_id=MAIN_GROUP_ID,
+            text=(
+                f"👋 Welcome, {name}!\n"
+                f"To join the daily prompt and discussion, please open a DM with me first: {bot_link}\n"
+                "Then just send your answer there before the reveal time. 🙌"
+            )
+        )
 
 # =========================
 # ⏰ SCHEDULED JOBS
@@ -116,6 +172,12 @@ async def set_discussion(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_daily_prompt(context: CallbackContext):
     bot = context.bot
     prompt = get_daily_prompt()
+
+    # Reset storage for new round
+    save_json(REPLIES_FILE, {})
+    set_participants([], None, today_key())
+
+    # Unpin old prompt
     try:
         chat = await bot.get_chat(MAIN_GROUP_ID)
         if chat.pinned_message:
@@ -123,12 +185,14 @@ async def send_daily_prompt(context: CallbackContext):
     except Exception as e:
         print("Unpin error:", e)
 
+    # Compose and pin new prompt
     text = (
         f"{prompt}\n\n"
-        "📝 *How it works (TEST MODE):*\n"
+        "📝 *How it works:*\n"
         "• Reply to me *in private* (text or voice).\n"
-        "• Reveal at *12:00*.\n"
-        "• Discussion clears at *12:20*. 💬"
+        f"• Reveal at *{REVEAL_TIME.strftime('%H:%M')}*.\n"
+        f"• Discussion stays open until *{CLEANUP_TIME.strftime('%H:%M')}*.\n"
+        "• Only people who replied will get a private invite link to the discussion. 💬"
     )
     msg = await bot.send_message(chat_id=MAIN_GROUP_ID, text=text, parse_mode="Markdown")
     try:
@@ -139,33 +203,39 @@ async def send_daily_prompt(context: CallbackContext):
 async def last_hour_reminder(context: CallbackContext):
     await context.bot.send_message(
         chat_id=MAIN_GROUP_ID,
-        text="⏳ *Reminder:* Last few minutes to reply privately before the reveal at *12:00*!",
+        text=(
+            "⏳ *Reminder:* Last minutes to reply privately before the reveal! "
+            f"Reveal is at *{REVEAL_TIME.strftime('%H:%M')}*."
+        ),
         parse_mode="Markdown"
     )
 
 async def reveal_replies(context: CallbackContext):
-    replies = load_json(REPLIES_FILE)
     bot = context.bot
+    replies = load_json(REPLIES_FILE)
     discussion_id = get_discussion_chat_id() or MAIN_GROUP_ID
 
-    if not replies:
-        await bot.send_message(discussion_id, "No replies received for this test. 😶")
-        return
-
+    # Post a header
     await bot.send_message(
-        discussion_id,
-        "🔓 *Test Reveal!* Here are today’s test replies — chat freely until 12:20 💬",
+        chat_id=discussion_id,
+        text=(
+            "🔓 *Discussion open!* Here are today’s replies — feel free to react & comment. "
+            f"Chat stays open until *{CLEANUP_TIME.strftime('%H:%M')}*."
+        ),
         parse_mode="Markdown"
     )
 
+    # Forward each reply (voice is forwarded; text is rendered)
     for uid, msg in replies.items():
         try:
+            # Best-effort forward (works for voice or text)
             await bot.forward_message(
                 chat_id=discussion_id,
                 from_chat_id=int(uid),
                 message_id=msg["message_id"]
             )
         except Exception:
+            # Fallback to attributed text if forwarding fails
             user = msg.get("from", {}).get("first_name", "Someone")
             text = msg.get("text")
             if text:
@@ -175,24 +245,86 @@ async def reveal_replies(context: CallbackContext):
                     parse_mode="Markdown"
                 )
 
+    # Create a private invite link that expires at cleanup
+    cleanup_dt = next_datetime_at(CLEANUP_TIME)
+    expire_ts = int(cleanup_dt.timestamp())
+
+    invite_link_obj = None
+    try:
+        invite_link_obj = await bot.create_chat_invite_link(
+            chat_id=discussion_id,
+            expire_date=expire_ts,
+            member_limit=0  # unlimited until expiry
+        )
+    except Exception as e:
+        print("Invite link error:", e)
+
+    # DM the invite link only to today’s respondents
+    p = get_participants()
+    p_ids = p["current"]
+
+    if invite_link_obj and p_ids:
+        for uid in p_ids:
+            try:
+                await bot.send_message(
+                    chat_id=uid,
+                    text=(
+                        "🗣 Your discussion link for today is ready!\n"
+                        f"Join here: {invite_link_obj.invite_link}\n\n"
+                        f"(Link expires at *{CLEANUP_TIME.strftime('%H:%M')}*.)"
+                    ),
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                # user may have blocked the bot / never started chat
+                print(f"DM invite failed for {uid}: {e}")
+
+        # Store participants + link (for cleanup & auditing)
+        set_participants(p_ids, invite_link_obj.invite_link, today_key())
+
+    # Clear replies after reveal; participants remain for cleanup
     save_json(REPLIES_FILE, {})
 
 async def cleanup_discussion(context: CallbackContext):
+    bot = context.bot
     discussion_id = get_discussion_chat_id() or MAIN_GROUP_ID
+    p = get_participants()
+    p_ids = p["current"]
+
+    # Try to revoke last invite link so latecomers can't join
+    if p.get("last_invite_link"):
+        try:
+            await bot.revoke_chat_invite_link(chat_id=discussion_id, invite_link=p["last_invite_link"])
+        except Exception as e:
+            print("Revoke link error:", e)
+
+    # Politely close
     try:
-        await context.bot.send_message(
+        await bot.send_message(
             chat_id=discussion_id,
-            text="🧹 Test discussion closed. Everything worked!"
+            text="🧹 Discussion closed — see you at the next prompt!"
         )
     except Exception:
         pass
+
+    # Remove all participants of this round (so next reveal is exclusive again)
+    for uid in p_ids:
+        try:
+            # Kick & immediately unban to remove without permanent ban
+            await bot.ban_chat_member(chat_id=discussion_id, user_id=uid)
+            await bot.unban_chat_member(chat_id=discussion_id, user_id=uid)
+        except Exception as e:
+            print(f"Kick failed for {uid}: {e}")
+
+    # Reset participants
+    set_participants([], None, today_key())
 
 # =========================
 # 🕒 COMMAND: /nexttimes
 # =========================
 async def show_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"🕒 *Test schedule (Amsterdam)*\n"
+        f"🕒 *Schedule (Amsterdam)*\n"
         f"• Prompt: {PROMPT_TIME.strftime('%H:%M')}\n"
         f"• Reminder: {REMINDER_TIME.strftime('%H:%M')}\n"
         f"• Reveal: {REVEAL_TIME.strftime('%H:%M')}\n"
@@ -201,37 +333,31 @@ async def show_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # =========================
-# 🚀 MAIN — WEBHOOK MODE (Render)
+# 🚀 MAIN
 # =========================
-def main():
-    if not RENDER_URL:
-        raise RuntimeError("RENDER_EXTERNAL_URL is not set — Render provides this automatically.")
 
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("nexttimes", show_schedule))
     app.add_handler(CommandHandler("setdiscussion", set_discussion))
+
+    # Welcome new users in MAIN group
+    app.add_handler(MessageHandler(filters.Chat(MAIN_GROUP_ID) & filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_members))
+
+    # Collect private replies (text or voice)
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT | filters.VOICE), collect_reply))
 
-    # Jobs (test)
+    # Jobs
     jq = app.job_queue
-    jq.run_daily(send_daily_prompt,  time=PROMPT_TIME,  name="prompt")
+    jq.run_daily(send_daily_prompt,  time=PROMPT_TIME,   name="daily_prompt")
     jq.run_daily(last_hour_reminder, time=REMINDER_TIME, name="reminder")
     jq.run_daily(reveal_replies,     time=REVEAL_TIME,   name="reveal")
     jq.run_daily(cleanup_discussion, time=CLEANUP_TIME,  name="cleanup")
 
-    webhook_path = BOT_TOKEN
-    webhook_url = f"{RENDER_URL.rstrip('/')}/{webhook_path}"
-    print(f"✅ Webhook listening on port {PORT}, URL: {webhook_url}")
-
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=webhook_path,
-        webhook_url=webhook_url,
-    )
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
