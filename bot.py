@@ -19,11 +19,10 @@ TIMEZONE = timezone("Europe/Amsterdam")
 
 # --- Daily Schedule (editable for testing) ---
 # Set these to your test or real times (Amsterdam tz)
-PROMPT_TIME   = time(12, 50, tzinfo=TIMEZONE)
-REMINDER_TIME = time(12, 55, tzinfo=TIMEZONE)
-REVEAL_TIME   = time(13,  5, tzinfo=TIMEZONE)
-CLEANUP_TIME  = time(13, 10, tzinfo=TIMEZONE)
-
+PROMPT_TIME   = time(14, 0, tzinfo=TIMEZONE)
+REMINDER_TIME = time(14, 5, tzinfo=TIMEZONE)
+REVEAL_TIME   = time(14, 15, tzinfo=TIMEZONE)
+CLEANUP_TIME  = time(14, 20, tzinfo=TIMEZONE)
 
 # =========================
 # 📋 PROMPTS
@@ -228,14 +227,12 @@ async def reveal_replies(context: CallbackContext):
     # Forward each reply (voice is forwarded; text is rendered)
     for uid, msg in replies.items():
         try:
-            # Best-effort forward (works for voice or text)
             await bot.forward_message(
                 chat_id=discussion_id,
                 from_chat_id=int(uid),
                 message_id=msg["message_id"]
             )
         except Exception:
-            # Fallback to attributed text if forwarding fails
             user = msg.get("from", {}).get("first_name", "Someone")
             text = msg.get("text")
             if text:
@@ -276,10 +273,8 @@ async def reveal_replies(context: CallbackContext):
                     parse_mode="Markdown"
                 )
             except Exception as e:
-                # user may have blocked the bot / never started chat
                 print(f"DM invite failed for {uid}: {e}")
 
-        # Store participants + link (for cleanup & auditing)
         set_participants(p_ids, invite_link_obj.invite_link, today_key())
 
     # Clear replies after reveal; participants remain for cleanup
@@ -310,7 +305,6 @@ async def cleanup_discussion(context: CallbackContext):
     # Remove all participants of this round (so next reveal is exclusive again)
     for uid in p_ids:
         try:
-            # Kick & immediately unban to remove without permanent ban
             await bot.ban_chat_member(chat_id=discussion_id, user_id=uid)
             await bot.unban_chat_member(chat_id=discussion_id, user_id=uid)
         except Exception as e:
@@ -333,7 +327,7 @@ async def show_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # =========================
-# 🚀 MAIN
+# 🚀 MAIN (WEBHOOK on Render)
 # =========================
 
 def main():
@@ -357,7 +351,28 @@ def main():
     jq.run_daily(reveal_replies,     time=REVEAL_TIME,   name="reveal")
     jq.run_daily(cleanup_discussion, time=CLEANUP_TIME,  name="cleanup")
 
-    app.run_polling()
+    # ---- Webhook configuration for Render ----
+    port = int(os.environ.get("PORT", "10000"))  # Render provides PORT
+    base_url = os.environ.get("RENDER_EXTERNAL_URL")  # Render provides this public URL
+    if not base_url:
+        raise RuntimeError("Missing RENDER_EXTERNAL_URL. Ensure this is a Web Service on Render.")
+    webhook_secret = os.environ.get("WEBHOOK_SECRET", "")  # optional but recommended
+
+    # Use a unique path (bot token) to avoid collisions
+    webhook_url = f"{base_url.rstrip('/')}/{BOT_TOKEN}"
+
+    print(f"🚀 Starting webhook server on 0.0.0.0:{port}")
+    print(f"🌐 Setting webhook to: {webhook_url}")
+
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=BOT_TOKEN,        # the path Telegram will call
+        webhook_url=webhook_url,   # the full public URL
+        secret_token=(webhook_secret or None),
+        allowed_updates=Update.ALL_TYPES,
+        # drop_pending_updates=True,  # uncomment if you want to discard old updates on restart
+    )
 
 if __name__ == "__main__":
     main()
