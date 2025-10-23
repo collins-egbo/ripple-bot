@@ -1,90 +1,128 @@
+# bot.py
 import os
 import json
 import random
+import logging
 from datetime import time, datetime, timedelta
+from typing import Optional
+
 from pytz import timezone
-from telegram import Update
+from telegram import Update, ChatInviteLink
+from telegram.constants import ParseMode
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes,
-    filters, CallbackContext
+    ApplicationBuilder, Application, CommandHandler, MessageHandler,
+    ContextTypes, CallbackContext, filters
 )
 
 # =========================
 # 🔧 CONFIGURATION
 # =========================
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+BOT_TOKEN   = os.environ["BOT_TOKEN"]
 MAIN_GROUP_ID = int(os.environ["GROUP_ID"])
-TIMEZONE = timezone("Europe/Amsterdam")
+PUBLIC_URL  = os.environ["PUBLIC_URL"].rstrip("/")  # e.g., https://ripple-bot.onrender.com
+PORT        = int(os.environ.get("PORT", "10000"))  # Render injects PORT
 
-# --- Daily Schedule (editable for testing) ---
-# Set these to your test or real times (Amsterdam tz)
-PROMPT_TIME   = time(14, 0, tzinfo=TIMEZONE)
-REMINDER_TIME = time(14, 5, tzinfo=TIMEZONE)
-REVEAL_TIME   = time(14, 15, tzinfo=TIMEZONE)
-CLEANUP_TIME  = time(14, 20, tzinfo=TIMEZONE)
+# Timezone
+TZ = timezone("Europe/Amsterdam")
+
+# --- Daily Schedule (EDIT THESE FOR TESTING OR PROD) ---
+# For testing in the same day, just set these to times later today.
+PROMPT_TIME   = time(15, 30, tzinfo=TZ)   # 20:00 – post the daily prompt
+REMINDER_TIME = time(15, 35, tzinfo=TZ)   # 17:00 – reminder (1h before reveal by default)
+REVEAL_TIME   = time(15, 40, tzinfo=TZ)   # 18:00 – open discussion & DM invite links
+CLEANUP_TIME  = time(15, 55, tzinfo=TZ)   # 17:00 next day – close & remove participants
+
+# Files for lightweight persistence (Render’s disk is ephemeral across restarts, okay for tests)
+USED_PROMPTS_FILE = "used_prompts.json"          # {"used": [indices]}
+DISCUSSION_FILE   = "discussion_group.json"      # {"chat_id": <int>}
+REPLIES_FILE      = "replies.json"               # {"<user_id>": <message_dict>}
+PARTICIPANTS_FILE = "participants.json"          # {"current":[ids], "last_invite_link":"...", "last_round":"YYYY-MM-DD"}
 
 # =========================
-# 📋 PROMPTS
+# 🗒️ PROMPTS (no repeats until all are used)
 # =========================
 
 PROMPTS = [
+    # 🧘 Mental Wellbeing
     {"topic": "Mental Wellbeing", "text": "What’s one small thing that secretly keeps you sane when life gets messy?"},
+    {"topic": "Mental Wellbeing", "text": "When was the last time you took a proper break — like really unplugged — and what did you do?"},
+    {"topic": "Mental Wellbeing", "text": "What’s something you’ve started doing lately that makes your days feel lighter?"},
+    {"topic": "Mental Wellbeing", "text": "If you could press pause on everything for a day, what would you spend that day doing?"},
+    {"topic": "Mental Wellbeing", "text": "Be honest — what’s your brain’s current “weather forecast”? (sunny, foggy, thunderstorms…)"},
+    {"topic": "Mental Wellbeing", "text": "What’s a habit you dropped that you kinda want back?"},
+    {"topic": "Mental Wellbeing", "text": "When do you usually feel most like yourself?"},
+    {"topic": "Mental Wellbeing", "text": "What’s something you wish more people understood about you right now?"},
+
+    # 🎉 Fun Memories
     {"topic": "Fun Memories", "text": "What’s a memory with this group that instantly makes you grin?"},
+    {"topic": "Fun Memories", "text": "Who in this group is most likely to turn a normal night into a story we’ll tell for years?"},
+    {"topic": "Fun Memories", "text": "What’s the dumbest inside joke you still remember?"},
+    {"topic": "Fun Memories", "text": "If you could relive one hilarious moment from our past together, which would it be?"},
+    {"topic": "Fun Memories", "text": "What’s something funny that happened recently that you wish we’d all been there for?"},
+    {"topic": "Fun Memories", "text": "What’s a trip, party, or random day that didn’t go as planned but turned out even better?"},
+    {"topic": "Fun Memories", "text": "What’s a “you had to be there” moment that still cracks you up?"},
+    {"topic": "Fun Memories", "text": "What’s one memory you’d 100% put in a highlight reel of your life?"},
+
+    # 🚀 Future Plans
     {"topic": "Future Plans", "text": "If this group planned a trip together, where would we end up — and who’s getting lost first?"},
+    {"topic": "Future Plans", "text": "What’s one dream you secretly hope you’ll pull off (even if it sounds crazy)?"},
+    {"topic": "Future Plans", "text": "If we met again in 10 years, what do you hope your life looks like?"},
+    {"topic": "Future Plans", "text": "What’s a skill or hobby you’ve been “meaning to start” forever — be honest!"},
+    {"topic": "Future Plans", "text": "If you had to make one bold change in your life before next summer, what would it be?"},
+    {"topic": "Future Plans", "text": "If your future self could send you a short voice note, what do you think they’d say?"},
+    {"topic": "Future Plans", "text": "What’s something you’d do if you knew you couldn’t fail?"},
+    {"topic": "Future Plans", "text": "What’s a goal that scares you a little (in a good way)?"},
+
+    # 💫 Friendship & Growth
+    {"topic": "Friendship & Growth", "text": "What’s something you’ve learned from someone in this group?"},
+    {"topic": "Friendship & Growth", "text": "When did you first realize this group had become your people?"},
+    {"topic": "Friendship & Growth", "text": "What’s one thing you wish we did more often together?"},
+    {"topic": "Friendship & Growth", "text": "How do you think you’ve changed the most since we first met?"},
+    {"topic": "Friendship & Growth", "text": "If you could tell your past self one thing from what you’ve learned lately, what would it be?"},
+    {"topic": "Friendship & Growth", "text": "What’s one way you try to show up for your friends, even on off days?"},
 ]
 
 # =========================
-# 🗂️ FILES
+# 🧰 UTILITIES
 # =========================
 
-USED_PROMPTS_FILE = "used_prompts.json"
-DISCUSSION_FILE   = "discussion_group.json"  # {"chat_id": int}
-REPLIES_FILE      = "replies.json"           # {user_id: full_message_dict}
-PARTICIPANTS_FILE = "participants.json"      # {"current": [user_ids], "last_invite_link": "...", "last_round": "YYYY-MM-DD"}
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
 
-# =========================
-# 📦 UTILITIES
-# =========================
-
-def load_json(file):
-    if not os.path.exists(file):
+def load_json(path: str):
+    if not os.path.exists(path):
         return {}
-    with open(file, "r", encoding="utf-8") as f:
-        try:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-        except json.JSONDecodeError:
-            return {}
+    except json.JSONDecodeError:
+        return {}
 
-def save_json(file, data):
-    with open(file, "w", encoding="utf-8") as f:
+def save_json(path: str, data: dict):
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f)
 
-def get_daily_prompt():
-    used_indices = load_json(USED_PROMPTS_FILE).get("used", [])
-    if len(used_indices) >= len(PROMPTS):
-        used_indices = []
-    available = [i for i in range(len(PROMPTS)) if i not in used_indices]
-    chosen_index = random.choice(available)
-    used_indices.append(chosen_index)
-    save_json(USED_PROMPTS_FILE, {"used": used_indices})
-    chosen = PROMPTS[chosen_index]
-    return f"🌞 *Daily Prompt*\n🧭 *Topic:* {chosen['topic']}\n💬 *Prompt:* {chosen['text']}"
+def today_key(dt: Optional[datetime] = None) -> str:
+    dt = dt or datetime.now(TZ)
+    return dt.strftime("%Y-%m-%d")
 
-def get_discussion_chat_id() -> int | None:
+def next_dt_at(t: time) -> datetime:
+    now = datetime.now(TZ)
+    target = now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+    if target < now:
+        target += timedelta(days=1)
+    return target
+
+def get_discussion_chat_id() -> Optional[int]:
     data = load_json(DISCUSSION_FILE)
     cid = data.get("chat_id")
     return int(cid) if cid is not None else None
 
 def set_discussion_chat_id(chat_id: int):
     save_json(DISCUSSION_FILE, {"chat_id": int(chat_id)})
-
-def set_participants(ids: list[int], invite_link: str | None, round_key: str):
-    save_json(PARTICIPANTS_FILE, {
-        "current": list(map(int, ids)),
-        "last_invite_link": invite_link,
-        "last_round": round_key,
-    })
 
 def get_participants():
     data = load_json(PARTICIPANTS_FILE)
@@ -94,284 +132,322 @@ def get_participants():
         "last_round": data.get("last_round"),
     }
 
-def today_key(dt: datetime | None = None) -> str:
-    dt = dt or datetime.now(TIMEZONE)
-    return dt.strftime("%Y-%m-%d")
+def set_participants(ids: list[int], invite_link: Optional[str], round_key: str):
+    save_json(PARTICIPANTS_FILE, {
+        "current": [int(x) for x in ids],
+        "last_invite_link": invite_link,
+        "last_round": round_key
+    })
 
-def next_datetime_at(t: time) -> datetime:
-    """Return the next datetime (>= now) at local time 't'."""
-    now = datetime.now(TIMEZONE)
-    target = now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
-    if target < now:
-        target += timedelta(days=1)
-    return target
+def get_daily_prompt_text() -> str:
+    used = load_json(USED_PROMPTS_FILE).get("used", [])
+    if len(used) >= len(PROMPTS):
+        used = []
+    choices = [i for i in range(len(PROMPTS)) if i not in used]
+    idx = random.choice(choices)
+    used.append(idx)
+    save_json(USED_PROMPTS_FILE, {"used": used})
+    p = PROMPTS[idx]
+    return f"🌞 *Daily Prompt*\n🧭 *Topic:* {p['topic']}\n💬 *Prompt:* {p['text']}"
+
+def fmt_hhmm(t: time) -> str:
+    return t.strftime("%H:%M")
 
 # =========================
 # 💬 HANDLERS
 # =========================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Hey! I’ll post a prompt in the group at the scheduled time. "
-        "Reply to me *privately* (text or voice) before the reveal to join the discussion. 💬",
-        parse_mode="Markdown"
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reply in DMs or group with basic instructions."""
+    bot = await context.bot.get_me()
+    bot_link = f"https://t.me/{bot.username}"
+    text = (
+        "Hey! I’ll post a daily prompt in the main group.\n\n"
+        "• Reply to me *privately* (text or voice/audio) to participate.\n"
+        f"• Reveal is at *{fmt_hhmm(REVEAL_TIME)}*.\n"
+        f"• The discussion stays open until *{fmt_hhmm(CLEANUP_TIME)}*.\n\n"
+        f"If you haven’t yet, open a DM with me here: {bot_link}"
     )
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
-async def collect_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Only accept private replies as entries
-    if update.effective_chat.type != "private":
+async def welcome_new_in_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Welcome message when *main* group gets a new member."""
+    if update.effective_chat.id != MAIN_GROUP_ID:
         return
-
-    replies = load_json(REPLIES_FILE)
-    user_id = str(update.message.from_user.id)
-    replies[user_id] = update.message.to_dict()
-    save_json(REPLIES_FILE, replies)
-
-    # Track participant for this round
-    p = get_participants()
-    curr = set(p["current"])
-    curr.add(int(user_id))
-    set_participants(sorted(curr), p.get("last_invite_link"), today_key())
-
-    await update.message.reply_text("Got it! Your reply’s saved for this round 💬")
-
-async def set_discussion(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text(
-            "Run this in the *discussion group* you want me to use.",
-            parse_mode="Markdown"
-        )
-        return
-    set_discussion_chat_id(chat.id)
-    await update.message.reply_text("✅ This group is now set as the discussion space.")
-
-async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Welcome message in the MAIN group when someone joins."""
-    chat = update.effective_chat
-    if chat.id != MAIN_GROUP_ID:
-        return
-    bot_user = await context.bot.get_me()
-    bot_link = f"https://t.me/{bot_user.username}"
+    bot = await context.bot.get_me()
+    bot_link = f"https://t.me/{bot.username}"
     for user in update.message.new_chat_members:
         name = user.first_name or "there"
         await context.bot.send_message(
             chat_id=MAIN_GROUP_ID,
-            text=(
-                f"👋 Welcome, {name}!\n"
-                f"To join the daily prompt and discussion, please open a DM with me first: {bot_link}\n"
-                "Then just send your answer there before the reveal time. 🙌"
-            )
+            text=(f"👋 Welcome, {name}!\n"
+                  f"To join the daily prompt, please DM the bot first: {bot_link}\n"
+                  f"Then send your answer there before *{fmt_hhmm(REVEAL_TIME)}*."),
+            parse_mode=ParseMode.MARKDOWN
         )
+
+async def welcome_in_discussion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tiny welcome if someone joins the discussion group (optional nicety)."""
+    disc_id = get_discussion_chat_id()
+    if disc_id and update.effective_chat.id == disc_id:
+        for user in update.message.new_chat_members:
+            await context.bot.send_message(
+                chat_id=disc_id,
+                text=(f"👋 Welcome, {user.first_name or 'friend'}! "
+                      f"Today’s chat stays open until *{fmt_hhmm(CLEANUP_TIME)}*. Enjoy!"),
+                parse_mode=ParseMode.MARKDOWN
+            )
+
+async def collect_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Collect replies only from private chat (text, voice, audio)."""
+    if update.effective_chat.type != "private":
+        return
+
+    # Save full message dict so we can forward it exactly
+    replies = load_json(REPLIES_FILE)
+    uid = str(update.message.from_user.id)
+    replies[uid] = update.message.to_dict()
+    save_json(REPLIES_FILE, replies)
+
+    # Track participant for THIS round
+    p = get_participants()
+    current = set(p["current"])
+    current.add(int(uid))
+    set_participants(sorted(current), p.get("last_invite_link"), today_key())
+
+    await update.message.reply_text("Got it! Your reply’s saved for this round 💬")
+
+async def cmd_setdiscussion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run this *inside the discussion group* once. It marks that chat as the discussion room."""
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text(
+            "Run /setdiscussion *inside the discussion group* you want me to use.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    set_discussion_chat_id(chat.id)
+    await update.message.reply_text("✅ This chat is now set as the discussion space.")
 
 # =========================
 # ⏰ SCHEDULED JOBS
 # =========================
 
-async def send_daily_prompt(context: CallbackContext):
+async def job_send_prompt(context: CallbackContext):
+    """Post the prompt in main group, reset round storage, and pin."""
     bot = context.bot
-    prompt = get_daily_prompt()
 
-    # Reset storage for new round
+    # Reset state for a new round
     save_json(REPLIES_FILE, {})
     set_participants([], None, today_key())
 
-    # Unpin old prompt
+    # Unpin old prompt if any
     try:
         chat = await bot.get_chat(MAIN_GROUP_ID)
         if chat.pinned_message:
-            await bot.unpin_chat_message(chat_id=MAIN_GROUP_ID)
+            await bot.unpin_chat_message(MAIN_GROUP_ID)
     except Exception as e:
-        print("Unpin error:", e)
+        logging.info(f"No old pin to unpin or error: {e}")
 
-    # Compose and pin new prompt
+    prompt = get_daily_prompt_text()
     text = (
         f"{prompt}\n\n"
         "📝 *How it works:*\n"
-        "• Reply to me *in private* (text or voice).\n"
-        f"• Reveal at *{REVEAL_TIME.strftime('%H:%M')}*.\n"
-        f"• Discussion stays open until *{CLEANUP_TIME.strftime('%H:%M')}*.\n"
-        "• Only people who replied will get a private invite link to the discussion. 💬"
+        "• Reply to me *in private* (text or voice/audio).\n"
+        f"• Reveal at *{fmt_hhmm(REVEAL_TIME)}*.\n"
+        f"• Discussion stays open until *{fmt_hhmm(CLEANUP_TIME)}*.\n"
+        "• Only people who replied will receive a private invite link. 💬"
     )
-    msg = await bot.send_message(chat_id=MAIN_GROUP_ID, text=text, parse_mode="Markdown")
+    msg = await bot.send_message(chat_id=MAIN_GROUP_ID, text=text, parse_mode=ParseMode.MARKDOWN)
     try:
         await bot.pin_chat_message(chat_id=MAIN_GROUP_ID, message_id=msg.message_id)
     except Exception as e:
-        print("Pin error:", e)
+        logging.warning(f"Pin error: {e}")
 
-async def last_hour_reminder(context: CallbackContext):
+async def job_reminder(context: CallbackContext):
     await context.bot.send_message(
         chat_id=MAIN_GROUP_ID,
-        text=(
-            "⏳ *Reminder:* Last minutes to reply privately before the reveal! "
-            f"Reveal is at *{REVEAL_TIME.strftime('%H:%M')}*."
-        ),
-        parse_mode="Markdown"
+        text=(f"⏳ *Reminder:* last minutes to reply privately before reveal at "
+              f"*{fmt_hhmm(REVEAL_TIME)}*."),
+        parse_mode=ParseMode.MARKDOWN
     )
 
-async def reveal_replies(context: CallbackContext):
+async def job_reveal(context: CallbackContext):
+    """Forward replies into discussion, DM invite link to today’s participants."""
     bot = context.bot
     replies = load_json(REPLIES_FILE)
-    discussion_id = get_discussion_chat_id() or MAIN_GROUP_ID
 
-    # Post a header
+    disc_id = get_discussion_chat_id()
+    if not disc_id:
+        # Safety fallback: use MAIN_GROUP if discussion group not configured
+        disc_id = MAIN_GROUP_ID
+        logging.warning("Discussion group not set. Using MAIN_GROUP_ID as discussion room.")
+
+    # Open the room
     await bot.send_message(
-        chat_id=discussion_id,
-        text=(
-            "🔓 *Discussion open!* Here are today’s replies — feel free to react & comment. "
-            f"Chat stays open until *{CLEANUP_TIME.strftime('%H:%M')}*."
-        ),
-        parse_mode="Markdown"
+        chat_id=disc_id,
+        text=(f"🔓 *Discussion open!* Here are today’s replies — react & comment.\n"
+              f"Chat stays open until *{fmt_hhmm(CLEANUP_TIME)}*."),
+        parse_mode=ParseMode.MARKDOWN
     )
 
-    # Forward each reply (voice is forwarded; text is rendered)
+    # Forward every reply (text, voice/audio) by original message_id
     for uid, msg in replies.items():
         try:
             await bot.forward_message(
-                chat_id=discussion_id,
+                chat_id=disc_id,
                 from_chat_id=int(uid),
                 message_id=msg["message_id"]
             )
-        except Exception:
+        except Exception as e:
+            # Fallback: attributed text if forwarding fails
             user = msg.get("from", {}).get("first_name", "Someone")
             text = msg.get("text")
             if text:
                 await bot.send_message(
-                    chat_id=discussion_id,
+                    chat_id=disc_id,
                     text=f"💬 *{user} said:* {text}",
-                    parse_mode="Markdown"
+                    parse_mode=ParseMode.MARKDOWN
                 )
+            logging.info(f"Forward failed for {uid}: {e}")
 
-    # Create a private invite link that expires at cleanup
-    cleanup_dt = next_datetime_at(CLEANUP_TIME)
+    # Create a one-time invite link that expires at cleanup
+    cleanup_dt = next_dt_at(CLEANUP_TIME)
     expire_ts = int(cleanup_dt.timestamp())
+    invite_obj: Optional[ChatInviteLink] = None
 
-    invite_link_obj = None
     try:
-        invite_link_obj = await bot.create_chat_invite_link(
-            chat_id=discussion_id,
+        invite_obj = await bot.create_chat_invite_link(
+            chat_id=disc_id,
             expire_date=expire_ts,
             member_limit=0  # unlimited until expiry
         )
     except Exception as e:
-        print("Invite link error:", e)
+        logging.error(f"Invite link creation failed. Is the bot admin with 'Invite Users'? Error: {e}")
 
-    # DM the invite link only to today’s respondents
+    # DM the link to today’s participants only
     p = get_participants()
-    p_ids = p["current"]
+    same_round = (p["last_round"] == today_key())
+    ids = p["current"] if same_round else []
 
-    if invite_link_obj and p_ids:
-        for uid in p_ids:
+    if not ids:
+        logging.info("No participants recorded for this round to DM.")
+    elif not invite_obj:
+        logging.error("Invite link missing; cannot DM participants.")
+    else:
+        for uid in ids:
             try:
                 await bot.send_message(
                     chat_id=uid,
-                    text=(
-                        "🗣 Your discussion link for today is ready!\n"
-                        f"Join here: {invite_link_obj.invite_link}\n\n"
-                        f"(Link expires at *{CLEANUP_TIME.strftime('%H:%M')}*.)"
-                    ),
-                    parse_mode="Markdown"
+                    text=(f"🗣 Your discussion link for today is ready!\n"
+                          f"Join here: {invite_obj.invite_link}\n\n"
+                          f"(Link expires at *{fmt_hhmm(CLEANUP_TIME)}*.)"),
+                    parse_mode=ParseMode.MARKDOWN
                 )
             except Exception as e:
-                print(f"DM invite failed for {uid}: {e}")
+                # User may not accept DMs or never pressed Start (shouldn’t happen if they replied)
+                logging.info(f"DM invite failed for {uid}: {e}")
 
-        set_participants(p_ids, invite_link_obj.invite_link, today_key())
+        # Persist for cleanup
+        set_participants(ids, invite_obj.invite_link, today_key())
 
-    # Clear replies after reveal; participants remain for cleanup
+    # Clear replies after reveal (participants remain until cleanup)
     save_json(REPLIES_FILE, {})
 
-async def cleanup_discussion(context: CallbackContext):
+async def job_cleanup(context: CallbackContext):
+    """Close the discussion and remove participants who joined for this round."""
     bot = context.bot
-    discussion_id = get_discussion_chat_id() or MAIN_GROUP_ID
+    disc_id = get_discussion_chat_id() or MAIN_GROUP_ID
     p = get_participants()
-    p_ids = p["current"]
+    ids = p["current"]
 
-    # Try to revoke last invite link so latecomers can't join
+    # Revoke last invite link
     if p.get("last_invite_link"):
         try:
-            await bot.revoke_chat_invite_link(chat_id=discussion_id, invite_link=p["last_invite_link"])
+            await bot.revoke_chat_invite_link(chat_id=disc_id, invite_link=p["last_invite_link"])
         except Exception as e:
-            print("Revoke link error:", e)
+            logging.info(f"Revoke failed (maybe already expired): {e}")
 
-    # Politely close
+    # Closing message
     try:
-        await bot.send_message(
-            chat_id=discussion_id,
-            text="🧹 Discussion closed — see you at the next prompt!"
-        )
+        await bot.send_message(chat_id=disc_id, text="🧹 Discussion closed — see you at the next prompt!")
     except Exception:
         pass
 
-    # Remove all participants of this round (so next reveal is exclusive again)
-    for uid in p_ids:
+    # Remove participants (requires admin with 'Ban Users')
+    for uid in ids:
         try:
-            await bot.ban_chat_member(chat_id=discussion_id, user_id=uid)
-            await bot.unban_chat_member(chat_id=discussion_id, user_id=uid)
+            await bot.ban_chat_member(chat_id=disc_id, user_id=uid)
+            await bot.unban_chat_member(chat_id=disc_id, user_id=uid)  # quick unban => kick without ban
         except Exception as e:
-            print(f"Kick failed for {uid}: {e}")
+            logging.info(f"Kick failed for {uid}: {e}")
 
-    # Reset participants
+    # Reset participant list
     set_participants([], None, today_key())
 
 # =========================
 # 🕒 COMMAND: /nexttimes
 # =========================
-async def show_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def cmd_nexttimes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"🕒 *Schedule (Amsterdam)*\n"
-        f"• Prompt: {PROMPT_TIME.strftime('%H:%M')}\n"
-        f"• Reminder: {REMINDER_TIME.strftime('%H:%M')}\n"
-        f"• Reveal: {REVEAL_TIME.strftime('%H:%M')}\n"
-        f"• Cleanup: {CLEANUP_TIME.strftime('%H:%M')}",
-        parse_mode="Markdown"
+        "🕒 *Schedule (Amsterdam)*\n"
+        f"• Prompt: {fmt_hhmm(PROMPT_TIME)}\n"
+        f"• Reminder: {fmt_hhmm(REMINDER_TIME)}\n"
+        f"• Reveal: {fmt_hhmm(REVEAL_TIME)}\n"
+        f"• Cleanup: {fmt_hhmm(CLEANUP_TIME)}",
+        parse_mode=ParseMode.MARKDOWN
     )
 
 # =========================
-# 🚀 MAIN (WEBHOOK on Render)
+# 🌐 WEBHOOK BOOTSTRAP
 # =========================
 
-def main():
+def build_app() -> Application:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # Commands
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("nexttimes", show_schedule))
-    app.add_handler(CommandHandler("setdiscussion", set_discussion))
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("nexttimes", cmd_nexttimes))
+    app.add_handler(CommandHandler("setdiscussion", cmd_setdiscussion))
 
-    # Welcome new users in MAIN group
-    app.add_handler(MessageHandler(filters.Chat(MAIN_GROUP_ID) & filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_members))
+    # Welcome messages
+    app.add_handler(MessageHandler(filters.Chat(MAIN_GROUP_ID) & filters.StatusUpdate.NEW_CHAT_MEMBERS,
+                                   welcome_new_in_main))
+    # Optional pleasant welcome in discussion room
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_in_discussion))
 
-    # Collect private replies (text or voice)
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT | filters.VOICE), collect_reply))
+    # Collect replies in private (text, voice notes, audio files)
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & (filters.TEXT | filters.VOICE | filters.AUDIO),
+            collect_reply
+        )
+    )
 
-    # Jobs
+    # Jobs (PTB’s JobQueue runs with the application)
     jq = app.job_queue
-    jq.run_daily(send_daily_prompt,  time=PROMPT_TIME,   name="daily_prompt")
-    jq.run_daily(last_hour_reminder, time=REMINDER_TIME, name="reminder")
-    jq.run_daily(reveal_replies,     time=REVEAL_TIME,   name="reveal")
-    jq.run_daily(cleanup_discussion, time=CLEANUP_TIME,  name="cleanup")
+    jq.run_daily(job_send_prompt,   time=PROMPT_TIME,   name="daily_prompt")
+    jq.run_daily(job_reminder,      time=REMINDER_TIME, name="reminder")
+    jq.run_daily(job_reveal,        time=REVEAL_TIME,   name="reveal")
+    jq.run_daily(job_cleanup,       time=CLEANUP_TIME,  name="cleanup")
 
-    # ---- Webhook configuration for Render ----
-    port = int(os.environ.get("PORT", "10000"))  # Render provides PORT
-    base_url = os.environ.get("RENDER_EXTERNAL_URL")  # Render provides this public URL
-    if not base_url:
-        raise RuntimeError("Missing RENDER_EXTERNAL_URL. Ensure this is a Web Service on Render.")
-    webhook_secret = os.environ.get("WEBHOOK_SECRET", "")  # optional but recommended
+    return app
 
-    # Use a unique path (bot token) to avoid collisions
-    webhook_url = f"{base_url.rstrip('/')}/{BOT_TOKEN}"
+def main():
+    app = build_app()
 
-    print(f"🚀 Starting webhook server on 0.0.0.0:{port}")
-    print(f"🌐 Setting webhook to: {webhook_url}")
+    # Use token in the URL path (simple/secure enough for hobby projects).
+    url_path = BOT_TOKEN
+    webhook_url = f"{PUBLIC_URL}/{url_path}"
 
+    # Run webhook server (Tornado) and set webhook at Telegram
+    # Render will see the bound $PORT and be happy ✅
     app.run_webhook(
         listen="0.0.0.0",
-        port=port,
-        url_path=BOT_TOKEN,        # the path Telegram will call
-        webhook_url=webhook_url,   # the full public URL
-        secret_token=(webhook_secret or None),
-        allowed_updates=Update.ALL_TYPES,
-        # drop_pending_updates=True,  # uncomment if you want to discard old updates on restart
+        port=PORT,
+        url_path=url_path,
+        webhook_url=webhook_url,
     )
 
 if __name__ == "__main__":
