@@ -28,9 +28,9 @@ TZ = timezone("Europe/Amsterdam")
 
 # --- Daily Schedule (EDIT THESE FOR TESTING OR PROD) ---
 # For testing in the same day, just set these to times later today.
-PROMPT_TIME   = time(15, 30, tzinfo=TZ)   # 20:00 – post the daily prompt
-REMINDER_TIME = time(15, 35, tzinfo=TZ)   # 17:00 – reminder (1h before reveal by default)
-REVEAL_TIME   = time(15, 40, tzinfo=TZ)   # 18:00 – open discussion & DM invite links
+PROMPT_TIME   = time(15, 40, tzinfo=TZ)   # 20:00 – post the daily prompt
+REMINDER_TIME = time(15, 45, tzinfo=TZ)   # 17:00 – reminder (1h before reveal by default)
+REVEAL_TIME   = time(15, 50, tzinfo=TZ)   # 18:00 – open discussion & DM invite links
 CLEANUP_TIME  = time(15, 55, tzinfo=TZ)   # 17:00 next day – close & remove participants
 
 # Files for lightweight persistence (Render’s disk is ephemeral across restarts, okay for tests)
