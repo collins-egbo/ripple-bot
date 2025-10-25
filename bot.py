@@ -52,27 +52,19 @@ PROMPTS = [
     {"topic": "Mental Wellbeing",
      "text": "When was the last time you took a proper break — like really unplugged — and what did you do?"},
     {"topic": "Mental Wellbeing",
-     "text": "What's something you've started doing lately that makes your days feel lighter?"},
-    {"topic": "Mental Wellbeing",
      "text": "If you could press pause on everything for a day, what would you spend that day doing?"},
-    {"topic": "Mental Wellbeing", "text": "Be honest — what's your brain's current "weather forecast
-     "? (sunny, foggy, thunderstorms…)"},
+    {"topic": "Mental Wellbeing",
+     "text": "Be honest — what's your brain's current 'weather forecast'? (sunny, foggy, thunderstorms…)"},
     {"topic": "Mental Wellbeing", "text": "What's a habit you dropped that you kinda want back?"},
-    {"topic": "Mental Wellbeing", "text": "When do you usually feel most like yourself?"},
-    {"topic": "Mental Wellbeing", "text": "What's something you wish more people understood about you right now?"},
 
     # 🎉 Fun Memories
     {"topic": "Fun Memories", "text": "What's a memory with this group that instantly makes you grin?"},
-    {"topic": "Fun Memories",
-     "text": "Who in this group is most likely to turn a normal night into a story we'll tell for years?"},
     {"topic": "Fun Memories", "text": "What's the dumbest inside joke you still remember?"},
     {"topic": "Fun Memories",
      "text": "If you could relive one hilarious moment from our past together, which would it be?"},
     {"topic": "Fun Memories",
      "text": "What's something funny that happened recently that you wish we'd all been there for?"},
-    {"topic": "Fun Memories",
-     "text": "What's a trip, party, or random day that didn't go as planned but turned out even better?"},
-    {"topic": "Fun Memories", "text": "What's a "you had to be there" moment that still cracks you up?"},
+    {"topic": "Fun Memories", "text": 'What’s a "you had to be there" moment that still cracks you up?'},
     {"topic": "Fun Memories", "text": "What's one memory you'd 100% put in a highlight reel of your life?"},
 
     # 🚀 Future Plans
@@ -80,11 +72,9 @@ PROMPTS = [
      "text": "If this group planned a trip together, where would we end up — and who's getting lost first?"},
     {"topic": "Future Plans", "text": "What's one dream you secretly hope you'll pull off (even if it sounds crazy)?"},
     {"topic": "Future Plans", "text": "If we met again in 10 years, what do you hope your life looks like?"},
-    {"topic": "Future Plans", "text": "What's a skill or hobby you've been "meaning to start" forever — be honest!"},
+    {"topic": "Future Plans", "text": 'What’s a skill or hobby you’ve been "meaning to start" forever — be honest!'},
     {"topic": "Future Plans",
      "text": "If you had to make one bold change in your life before next summer, what would it be?"},
-    {"topic": "Future Plans",
-     "text": "If your future self could send you a short voice note, what do you think they'd say?"},
     {"topic": "Future Plans", "text": "What's something you'd do if you knew you couldn't fail?"},
     {"topic": "Future Plans", "text": "What's a goal that scares you a little (in a good way)?"},
 
@@ -95,7 +85,6 @@ PROMPTS = [
     {"topic": "Friendship & Growth", "text": "How do you think you've changed the most since we first met?"},
     {"topic": "Friendship & Growth",
      "text": "If you could tell your past self one thing from what you've learned lately, what would it be?"},
-    {"topic": "Friendship & Growth", "text": "What's one way you try to show up for your friends, even on off days?"},
 ]
 
 # =========================
