@@ -52,17 +52,26 @@ PROMPTS = [
     {"topic": "Mental Wellbeing",
      "text": "When was the last time you took a proper break — like really unplugged — and what did you do?"},
     {"topic": "Mental Wellbeing",
+     "text": "What's something you've started doing lately that makes your days feel lighter?"},
+    {"topic": "Mental Wellbeing",
      "text": "If you could press pause on everything for a day, what would you spend that day doing?"},
-    {"topic": "Mental Wellbeing", "text": "Be honest — what's your brain's current 'weather forecast'? (sunny, foggy, thunderstorms…)"},
+    {"topic": "Mental Wellbeing", "text": "Be honest — what's your brain's current "weather forecast
+     "? (sunny, foggy, thunderstorms…)"},
     {"topic": "Mental Wellbeing", "text": "What's a habit you dropped that you kinda want back?"},
+    {"topic": "Mental Wellbeing", "text": "When do you usually feel most like yourself?"},
+    {"topic": "Mental Wellbeing", "text": "What's something you wish more people understood about you right now?"},
 
     # 🎉 Fun Memories
     {"topic": "Fun Memories", "text": "What's a memory with this group that instantly makes you grin?"},
+    {"topic": "Fun Memories",
+     "text": "Who in this group is most likely to turn a normal night into a story we'll tell for years?"},
     {"topic": "Fun Memories", "text": "What's the dumbest inside joke you still remember?"},
     {"topic": "Fun Memories",
      "text": "If you could relive one hilarious moment from our past together, which would it be?"},
     {"topic": "Fun Memories",
      "text": "What's something funny that happened recently that you wish we'd all been there for?"},
+    {"topic": "Fun Memories",
+     "text": "What's a trip, party, or random day that didn't go as planned but turned out even better?"},
     {"topic": "Fun Memories", "text": "What's a "you had to be there" moment that still cracks you up?"},
     {"topic": "Fun Memories", "text": "What's one memory you'd 100% put in a highlight reel of your life?"},
 
@@ -74,6 +83,8 @@ PROMPTS = [
     {"topic": "Future Plans", "text": "What's a skill or hobby you've been "meaning to start" forever — be honest!"},
     {"topic": "Future Plans",
      "text": "If you had to make one bold change in your life before next summer, what would it be?"},
+    {"topic": "Future Plans",
+     "text": "If your future self could send you a short voice note, what do you think they'd say?"},
     {"topic": "Future Plans", "text": "What's something you'd do if you knew you couldn't fail?"},
     {"topic": "Future Plans", "text": "What's a goal that scares you a little (in a good way)?"},
 
@@ -84,6 +95,7 @@ PROMPTS = [
     {"topic": "Friendship & Growth", "text": "How do you think you've changed the most since we first met?"},
     {"topic": "Friendship & Growth",
      "text": "If you could tell your past self one thing from what you've learned lately, what would it be?"},
+    {"topic": "Friendship & Growth", "text": "What's one way you try to show up for your friends, even on off days?"},
 ]
 
 # =========================
@@ -527,6 +539,41 @@ async def cmd_nexttimes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
+# 🔄 STARTUP RECOVERY
+# =========================
+
+async def recover_jobs_on_startup(application: Application):
+    """
+    Called once on startup. If there's a pending round (prompt posted but reveal not done yet),
+    re-schedule the missing jobs so they don't get lost after a restart.
+    """
+    last_prompt = get_last_prompt_time()
+    if not last_prompt:
+        logging.info("No pending round found on startup.")
+        return
+
+    now = datetime.now(TZ)
+    times = calculate_event_times(last_prompt)
+
+    # Check which events are still in the future and need to be rescheduled
+    if times["reminder"] > now:
+        application.job_queue.run_once(job_reminder, times["reminder"])
+        logging.info(f"✅ Rescheduled reminder for {times['reminder']}")
+
+    if times["reveal"] > now:
+        application.job_queue.run_once(job_reveal, times["reveal"])
+        logging.info(f"✅ Rescheduled reveal for {times['reveal']}")
+
+    if times["cleanup"] > now:
+        application.job_queue.run_once(job_cleanup, times["cleanup"])
+        logging.info(f"✅ Rescheduled cleanup for {times['cleanup']}")
+
+    # If all events are in the past, the round is over (shouldn't happen but good to log)
+    if times["cleanup"] <= now:
+        logging.info("⏭️ Last round already completed. Waiting for next prompt.")
+
+
+# =========================
 # 🌐 WEBHOOK BOOTSTRAP
 # =========================
 
@@ -561,6 +608,9 @@ def build_app() -> Application:
 
 def main():
     app = build_app()
+
+    # Recover any pending jobs from before a restart
+    app.post_init = recover_jobs_on_startup
 
     # Use token in the URL path (simple/secure enough for hobby projects).
     url_path = BOT_TOKEN
